@@ -34,11 +34,20 @@ from pprint import PrettyPrinter
 from enum import Enum
 import shutil
 
+# Custom JSON encoder to handle bytes objects
+class BytesEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, bytes):
+            # Convert bytes to base64 string for JSON serialization
+            import base64
+            return base64.b64encode(obj).decode('utf-8')
+        return super().default(obj)
+
 DEFAULT_FNAME_PATTERN = '{file_ctime_iso}_{image_hash_short}_[app={meta_type_name}, seed={seed}, cfg={cfg_scale}, steps={steps}, sampler={sampler}, model={model}, mhash={model_hash_short}]'
 DEFAULT_DB_FILE = str(Path.home()) + '/ai_meta.db'
 DEFAULT_LOG_FILE = str(Path.home()) + '/ai_meta.log'
 DEFAULT_LOGLEVEL_FILE = 'INFO'
-DEFAULT_LOGLEVEL_CL = 'WARNING'
+DEFAULT_LOGLEVEL_CLI = 'WARNING'
 
 class Mode(Enum):
     UPDATEDB = 1
@@ -53,6 +62,7 @@ class MetaType(Enum):
     INVOKEAI = 1
     A1111 = 2
     COMFYUI = 3
+    INVOKE = 4
 
 log = logging
 args = None
@@ -103,10 +113,10 @@ def args_init():
                         help='Log file location [default: %s]' % DEFAULT_LOG_FILE)
     parser.add_argument('--loglevel-file', type=str.upper, default=DEFAULT_LOGLEVEL_FILE,
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-                        help='Log level for log file [default: %s], loglevel_cl will overwrite if higher' % DEFAULT_LOGLEVEL_FILE)
-    parser.add_argument('--loglevel-cl', type=str.upper, default=DEFAULT_LOGLEVEL_CL,
+                        help='Log level for log file [default: %s], loglevel_cli will overwrite if higher' % DEFAULT_LOGLEVEL_FILE)
+    parser.add_argument('--loglevel-cli', type=str.upper, default=DEFAULT_LOGLEVEL_CLI,
                         choices=['NONE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-                        help='Log level for command line output [default: %s], NONE for quiet mode (results only)' % DEFAULT_LOGLEVEL_CL)
+                        help='Log level for command line output [default: %s], NONE for quiet mode (results only)' % DEFAULT_LOGLEVEL_CLI)
     parser.add_argument('--force-overwrite', action='store_true',
                         help='Force overwrite existing files [default: append index]')
     global args, mode
@@ -207,7 +217,7 @@ def db_init(dbfile):
 
 def init():
     args_init()
-    log_init(args.logfile, args.loglevel_file, args.loglevel_cl)
+    log_init(args.logfile, args.loglevel_file, args.loglevel_cli)
     db_init(args.dbfile)
     # Set the standard output encoding to utf-8
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -327,11 +337,11 @@ def get_meta(path, png, image_hash, png_meta_as_dict=False, verbose_png_info=Fal
         meta_dict = png.info
         #meta_dict['xmp_json'] = json.dumps(xmltodict.parse(meta_dict['XML:com.adobe.xmp']), indent=4)
         #print(meta_dict['xmp_json'])
-        if ('sd-metadata' in meta_dict):  # invoke-ai
-            # parse sd-metadata (json) string to dict
+        if ('sd-metadata' in meta_dict):  # invoke-ai (old)
+            # parse sd-metadata json string to dict
             sd_meta = json.loads(meta_dict['sd-metadata'])
             sd_meta[META_TYPE_KEY] = MetaType.INVOKEAI.value
-            meta_dict['sd-metadata'] = sd_meta  # overwrite json-string with dict
+            meta_dict['sd-metadata'] = sd_meta  # overwrite json string with dict
         elif ('workflow' in meta_dict):   # comfyui
             sd_meta = {}
             # even if verbose_comfyui_info=False, they following two are loaded (needed for data extraction) but not returned
@@ -345,13 +355,22 @@ def get_meta(path, png, image_hash, png_meta_as_dict=False, verbose_png_info=Fal
         elif ('parameters' in meta_dict):   # a1111
             sd_meta = a1111_meta_to_dict_to_json(meta_dict['parameters'])
             sd_meta[META_TYPE_KEY] = MetaType.A1111.value
-
+        elif ('invokeai_metadata' in meta_dict):  # invoke (new)
+            # parse invokeai_metadata and invokeai_graph json string to dict
+            sd_meta = {}
+            sd_meta['invokeai_metadata'] = json.loads(meta_dict['invokeai_metadata'])
+            sd_meta['invokeai_graph'] = json.loads(meta_dict['invokeai_graph'])
+            sd_meta[META_TYPE_KEY] = MetaType.INVOKE.value
+            print(str(sd_meta))
+            meta_dict['invokeai_metadata'] = sd_meta['invokeai_metadata']  # overwrite json string with dict
+            meta_dict['invokeai_graph'] = sd_meta['invokeai_graph']  # overwrite json string with dict
         else:
             raise InvalidMeta("No known meta found in [file_path:\"%s\"]" % path)
     except KeyError as e:
         log.error("Error while extracting basic meta from [file_path: %s]\n  -> %s" % (path, e))
         raise InvalidMeta(e)
-    png_info = meta_dict if png_meta_as_dict else json.dumps(meta_dict)
+    # extract relevant fields based on meta type
+    png_info = meta_dict if png_meta_as_dict else json.dumps(meta_dict, cls=BytesEncoder)
     m = sd_meta.copy()
     if sd_meta[META_TYPE_KEY] == MetaType.INVOKEAI.value:
         # TODO add all fields (update m with flattened keys)
@@ -384,6 +403,44 @@ def get_meta(path, png, image_hash, png_meta_as_dict=False, verbose_png_info=Fal
                   "file_ctime_iso": get_ctime_iso_from_name_or_meta(path),
                   "file_mtime_iso": timestamp_to_iso(os.path.getmtime(path))})
         result = m
+    elif sd_meta[META_TYPE_KEY] == MetaType.INVOKE.value:
+        m.update({"meta_type": sd_meta[META_TYPE_KEY],
+                  "meta_type_name": MetaType.INVOKE.name,
+                  "file_name": file_name,
+                  "app_version": sd_meta['invokeai_metadata']['app_version'],
+                  "generation_mode": sd_meta['invokeai_metadata']['generation_mode'],
+                  "model": sd_meta['invokeai_metadata']['model']['name'],
+                  "model_hash": sd_meta['invokeai_metadata']['model']['hash'],
+                  "model_base": sd_meta['invokeai_metadata']['model']['base'],
+                  "model_type": sd_meta['invokeai_metadata']['model']['type'],
+                  "model_key": sd_meta['invokeai_metadata']['model']['key'],
+                  "prompt": sd_meta['invokeai_metadata']['positive_prompt'],
+                  "negative_prompt": sd_meta['invokeai_metadata']['negative_prompt'],
+                  "steps": sd_meta['invokeai_metadata']['steps'],
+                  "cfg_scale": sd_meta['invokeai_metadata']['cfg_scale'],
+                  "cfg_rescale_multiplier": sd_meta['invokeai_metadata']['cfg_rescale_multiplier'],
+                  "sampler": sd_meta['invokeai_metadata']['scheduler'],
+                  "height": sd_meta['invokeai_metadata']['height'],
+                  "width": sd_meta['invokeai_metadata']['width'],
+                  "seed": sd_meta['invokeai_metadata']['seed'],
+                  "seamless_x": sd_meta['invokeai_metadata']['seamless_x'],
+                  "seamless_y": sd_meta['invokeai_metadata']['seamless_y'],
+                  "image_hash": image_hash,
+                  "file_ctime_iso": get_ctime_iso_from_name_or_meta(path),
+                  "file_mtime_iso": timestamp_to_iso(os.path.getmtime(path))})
+        m.update({"file_cdate_iso": m['file_ctime_iso'].split("T")[0],
+                  "file_mdate_iso": m['file_mtime_iso'].split("T")[0]})
+        result = m
+    elif sd_meta[META_TYPE_KEY] == MetaType.A1111.value:
+        m.update({"meta_type": sd_meta[META_TYPE_KEY],
+                  "meta_type_name": MetaType.A1111.name,
+                  "file_name": file_name,
+                  "image_hash": image_hash,
+                  "file_ctime": os.path.getctime(path), # TODO not primarily take from filename
+                  "file_mtime": os.path.getmtime(path),
+                  "file_ctime_iso": get_ctime_iso_from_name_or_meta(path),
+                  "file_mtime_iso": timestamp_to_iso(os.path.getmtime(path))})
+        result = m
     else:  # comfyui
         m.update({"meta_type": sd_meta[META_TYPE_KEY],
                   "meta_type_name": MetaType.COMFYUI.name,
@@ -395,7 +452,7 @@ def get_meta(path, png, image_hash, png_meta_as_dict=False, verbose_png_info=Fal
                   "type": None,          # info not provided (t2i/i2i)
                   "prompt": "",          # default if none found below
                   "steps": "",           # default if none found below
-                  "seed": "",           # default if none found below
+                  "seed": "",            # default if none found below
                   "cfg_scale": "",       # default if none found below
                   #"clip_skip": "",       # default if none found below
                   "sampler": "",         # default if none found below
@@ -781,7 +838,12 @@ def rename_file(file_path, png, image_hash):
         out_path = os.path.normpath(os.path.join(args.target_dir, out_file_name_sanitized))
         if not Path(args.target_dir).exists():
             log.info("The --target-dir '%s' doesn't exist, trying to create it .." % args.target_dir)
-            Path(args.target_dir).mkdir(parents=True, exist_ok=True)
+            if (args.no_act):
+                msg = "Would create directory: [\"%s\"]" % out_dir
+                log.info(msg)
+                print(msg)
+            else:
+                Path(args.target_dir).mkdir(parents=True, exist_ok=True)
     if args.dname_pattern:
         use_subdir = True
         sub_dir = args.dname_pattern.format(**meta) + '/'
@@ -797,7 +859,12 @@ def rename_file(file_path, png, image_hash):
                 log.info("The --target-dir '%s' + --dname-pattern '%s' directory '%s' doesn't exist, trying to create it ..", args.target_dir, args.dname_pattern, out_dir)
             else:
                 log.info("The --dname-pattern '%s' directory '%s' doesn't exist, trying to create it ..", args.dname_pattern, out_dir)
-            Path(out_dir).mkdir(parents=True, exist_ok=True)
+            if (args.no_act):
+                msg = "Would create directory: [\"%s\"]" % out_dir
+                log.info(msg)
+                print(msg)
+            else:
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
     if (os.path.normpath(file_path) == out_path):
         log.warning("Outfile identical to infile name [%s], skipping ..." % out_path)
         return
@@ -850,7 +917,7 @@ def print_file_meta_json(path, png, image_hash, verbose_png_info=False, verbose_
         log.warning("Unable to read meta from [file_path: \"%s\"], skipping .." % path)
         log.debug(e)
         return
-    print(json.dumps(file_meta, indent=4))
+    print(json.dumps(file_meta, indent=4, cls=BytesEncoder))
 
 
 def print_file_meta_csv(path, png, image_hash):
@@ -876,10 +943,13 @@ def print_file_meta_keyvalue(path, png, image_hash, verbose_png_info=False, verb
 
     # output core dicts in the given order
     # note that depending on e.g. the use of --include-comfy-info some keys might not be present
-    ordered_keys = ['png_info', 'comfyui_workflow', 'comfyui_prompt', 'parameters']
+    ordered_keys = ['png_info', 'comfyui_workflow', 'comfyui_prompt', 'parameters', 'invokeai_metadata']
     for key in ordered_keys:
         if key not in file_meta:
             continue
+        if isinstance(file_meta[key], str):
+            log.debug("Skipping simple string key [%s] in ordered key output." % key)
+            continue  # skip simple strings
         val = file_meta[key].copy() # copy since we may modify it below, and we still need the original
         # remove extra_info from parameters if verbose_comfyui_info=False
         # we already pretty-print it below, this is just a raw dump
@@ -887,7 +957,7 @@ def print_file_meta_keyvalue(path, png, image_hash, verbose_png_info=False, verb
             if 'extra_info' in file_meta[key]:
                 val.pop('extra_info')
         try:
-            print("%s%s" % (substitute_key(key, ": "), json.dumps(val, indent=2).encode('utf-8', errors='replace').decode('utf-8')))
+            print("%s%s" % (substitute_key(key, ": "), json.dumps(val, indent=2, cls=BytesEncoder).encode('utf-8', errors='replace').decode('utf-8')))
         except Error as e:
             val = substitute_value(val)
             print("%s%s" % (substitute_key(key, ": "), val.encode('utf-8', errors='replace').decode('utf-8')))

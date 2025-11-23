@@ -50,8 +50,8 @@ DEFAULT_LOGLEVEL_FILE = 'INFO'
 DEFAULT_LOGLEVEL_CLI = 'WARNING'
 
 class Mode(Enum):
-    UPDATEDB = 1
-    MATCHDB = 2
+    UPDATEDB = 1 # TODO db modes need review (still needed, actually useful or never really finished?)
+    MATCHDB = 2  # TODO db modes need review (still needed, actually useful or never really finished?)
     RENAME = 3
     TOJSON = 4
     TOCSV = 5
@@ -117,6 +117,9 @@ def args_init():
     parser.add_argument('--loglevel-cli', type=str.upper, default=DEFAULT_LOGLEVEL_CLI,
                         choices=['NONE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
                         help='Log level for command line output [default: %s], NONE for quiet mode (results only)' % DEFAULT_LOGLEVEL_CLI)
+    parser.add_argument('--loglevel-cl', type=str.upper, default=DEFAULT_LOGLEVEL_CLI,
+                        choices=['NONE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+                        help=argparse.SUPPRESS) # DEPRECATED hidden duplicate for backward compatibility
     parser.add_argument('--force-overwrite', action='store_true',
                         help='Force overwrite existing files [default: append index]')
     global args, mode
@@ -143,7 +146,7 @@ def log_init(logfile_path, level_file, level_cl):
         ch.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')) #| %(name)s
         log.addHandler(ch)
 
-
+# TODO db modes need review (still needed, actually useful or never really finished?)
 # create a database connection to a SQLite database
 def db_connect(db_file):
     global conn
@@ -160,6 +163,7 @@ def db_connect(db_file):
     #        db_conn.close()
 
 
+# TODO db modes need review (still needed, actually useful or never really finished?)
 # initialize db if non-existing
 def db_init(dbfile):
     log.info("Opening DB connection to: %s" % dbfile)
@@ -361,7 +365,6 @@ def get_meta(path, png, image_hash, png_meta_as_dict=False, verbose_png_info=Fal
             sd_meta['invokeai_metadata'] = json.loads(meta_dict['invokeai_metadata'])
             sd_meta['invokeai_graph'] = json.loads(meta_dict['invokeai_graph'])
             sd_meta[META_TYPE_KEY] = MetaType.INVOKE.value
-            print(str(sd_meta))
             meta_dict['invokeai_metadata'] = sd_meta['invokeai_metadata']  # overwrite json string with dict
             meta_dict['invokeai_graph'] = sd_meta['invokeai_graph']  # overwrite json string with dict
         else:
@@ -607,6 +610,7 @@ def get_meta(path, png, image_hash, png_meta_as_dict=False, verbose_png_info=Fal
     return result
 
 
+# TODO db modes need review (still needed, actually useful or never really finished?)
 def db_get_meta_file_name_by_hash(image_hash):
     sql_select = """SELECT file_name FROM meta WHERE image_hash = :image_hash;"""
     cur = conn.cursor()
@@ -615,6 +619,7 @@ def db_get_meta_file_name_by_hash(image_hash):
     return None if row is None else row[0]
 
 
+# TODO db modes need review (still needed, actually useful or never really finished?)
 def db_insert_meta(path, png, image_hash):
     file_name = os.path.basename(path)
     log.info("Inserting meta in DB for [image_hash: %s, path: \"%s\"" % (image_hash, str(path)))
@@ -653,6 +658,7 @@ def db_insert_meta(path, png, image_hash):
         conn.rollback()
 
 
+# TODO db modes need review (still needed, actually useful or never really finished?)
 def db_update_meta(path, png, image_hash):
     log.info("Updating meta in DB for [image_hash: %s, path: \"%s\"" % (image_hash, str(path)))
     sql_update_meta = """UPDATE meta
@@ -677,6 +683,7 @@ def db_update_meta(path, png, image_hash):
         conn.rollback()
 
 
+# TODO db modes need review (still needed, actually useful or never really finished?)
 def db_update_or_create_meta(path, png, image_hash):
     file_name_org = db_get_meta_file_name_by_hash(image_hash)
     if (file_name_org == None):  # not found?
@@ -733,7 +740,7 @@ def meta_to_output_tuple(dict):
             dict['file_ctime_iso'], dict['file_mtime_iso'], dict['file_name'],
             dict['app_id'], dict['app_version'], sanitize_value(prompt_esc))
 
-
+# TODO db modes need review (still needed, actually useful or never really finished?)
 def db_match(path, png, image_hash, idx, sort=False):
     result = []
     print_pattern = "%s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | \"%s\" | \"%s\""
@@ -841,7 +848,7 @@ def rename_file(file_path, png, image_hash):
             if (args.no_act):
                 msg = "Would create directory: [\"%s\"]" % out_dir
                 log.info(msg)
-                print(msg)
+                # print(msg) # TODO redundant?
             else:
                 Path(args.target_dir).mkdir(parents=True, exist_ok=True)
     if args.dname_pattern:
@@ -862,7 +869,7 @@ def rename_file(file_path, png, image_hash):
             if (args.no_act):
                 msg = "Would create directory: [\"%s\"]" % out_dir
                 log.info(msg)
-                print(msg)
+                # print(msg) # TODO redundant?
             else:
                 Path(out_dir).mkdir(parents=True, exist_ok=True)
     if (os.path.normpath(file_path) == out_path):
@@ -883,7 +890,7 @@ def rename_file(file_path, png, image_hash):
     elif (args.no_act):
         msg = "Would rename: [\"%s\"] -> [\"%s\"]" % (file_path, out_path)
         log.info(msg)
-        print(msg)
+        # print(msg) # TODO redundant?
         return
 
     # skip if source and target are the same
@@ -901,12 +908,12 @@ def rename_file(file_path, png, image_hash):
         if (os.path.basename(file_path) == out_file_name_sanitized):
             msg = "Moving, filename unchanged: [\"%s\"] -> [\"%s\"]" % (file_path, out_path)
         log.info(msg)
-        print(msg)
+        # print(msg) # TODO redundant?
         shutil.move(file_path, out_path)
     else:
         msg = "Renaming: [\"%s\"] -> [\"%s\"]" % (file_path, out_path)
         log.info(msg)
-        print(msg)
+        # print(msg) # TODO redundant?
         os.rename(file_path, out_path)
 
 
@@ -1000,9 +1007,9 @@ def process_file(file_path, idx):
         log.warning("I/O error while calculate image hash for file [\"%s\"], skipping ...")
         log.debug(e)
         return
-    if (mode == Mode.UPDATEDB):
+    if (mode == Mode.UPDATEDB): # TODO db modes need review (still needed, actually useful or never really finished?)
         db_update_or_create_meta(file_path, png, image_hash)
-    elif (mode == Mode.MATCHDB):
+    elif (mode == Mode.MATCHDB): # TODO db modes need review (still needed, actually useful or never really finished?)
         print_column_headers()
         db_match(file_path, png, image_hash, idx, args.sort_matches)
     elif (mode == Mode.RENAME):

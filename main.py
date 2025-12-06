@@ -56,6 +56,7 @@ class Mode(Enum):
     TOJSON = 4
     TOCSV = 5
     TOKEYVALUE = 6
+    EXTRACT = 7
 
 META_TYPE_KEY = 'meta_type'
 class MetaType(Enum):
@@ -83,8 +84,8 @@ def args_init():
     parser.add_argument('infile', type=Path, nargs='+',
                         help='One or more file names, directories, or glob patterns')
     parser.add_argument('--mode', type=str.upper, default='TOKEYVALUE',
-                        choices=['UPDATEDB', 'MATCHDB', 'RENAME', 'TOJSON', 'TOCSV', 'TOKEYVALUE'],
-                        help='Processing mode [RENAME: reame files by metadata, UPDATEDB: add file meta to db, MATCHDB: match file meta with db')
+                        choices=['UPDATEDB', 'MATCHDB', 'RENAME', 'TOJSON', 'TOCSV', 'TOKEYVALUE', 'EXTRACT'],
+                        help='Processing mode [RENAME: reame files by metadata, UPDATEDB: add file meta to db, MATCHDB: match file meta with db, EXTRACT: extract single field value from png.info]')
     parser.add_argument('--similarity-min', type=int, default=0,
                         help='Filter matchdb mode results based on similarity >= X [default: 0]')
     parser.add_argument('--sort_matches', action='store_true',
@@ -122,14 +123,22 @@ def args_init():
                         help=argparse.SUPPRESS) # DEPRECATED hidden duplicate for backward compatibility
     parser.add_argument('--force-overwrite', action='store_true',
                         help='Force overwrite existing files [default: append index]')
+    parser.add_argument('--extract-field', type=str,
+                        help='Field key to extract from png.info (used with --mode EXTRACT). When set, only the field value is printed to stdout (log level will be lowered to ERROR by default).')
     global args, mode
     args = parser.parse_args()
+    # Validate extract mode
+    if args.mode == 'EXTRACT' and not args.extract_field:
+        parser.error('--extract-field is required when using --mode EXTRACT')
     mode = Mode[args.mode]
 
 
 # initialize logger
 def log_init(logfile_path, level_file, level_cl):
     # TODO check if we can't just add a separate file handler and selt base consig to DEBUG
+    # When in EXTRACT mode, default to NONE for CLI logging to suppress all stdout output (unless explicitly overridden)
+    if mode == Mode.EXTRACT and level_cl == DEFAULT_LOGLEVEL_CLI:
+        level_cl = 'ERROR'
     # cl level can't be higher than core log level
     if (level_cl != 'NONE' and (logging.getLevelName(level_cl) < logging.getLevelName(level_file))):
         level_file = level_cl
@@ -985,6 +994,46 @@ def print_file_meta_keyvalue(path, png, image_hash, verbose_png_info=False, verb
         val = substitute_value(file_meta[key])
         print("%s%s" % (substitute_key(key, ": "), val.encode('utf-8', errors='replace').decode('utf-8')))
 
+def extract_field_value(path, png, image_hash, field_key):
+    """Extract a single field value from png.info and print it to stdout."""
+    try:
+        # Get png.info as dict to access raw metadata fields
+        meta_dict = png.info
+        if field_key in meta_dict:
+            field_value = meta_dict[field_key]
+            # If it's a string, print as-is (could be JSON or raw text)
+            if isinstance(field_value, str):
+                print(field_value)
+            else:
+                # If it's bytes or other type, try to decode or convert to string
+                try:
+                    print(field_value.decode('utf-8') if isinstance(field_value, bytes) else str(field_value))
+                except Exception as e:
+                    log.error("Unable to decode field value for [field_key: \"%s\"], skipping ..." % field_key)
+                    log.debug(e)
+                    return
+        else:
+            # Field not found in raw png.info, try looking in extracted metadata
+            try:
+                extracted_meta = get_meta(path, png, image_hash)
+                if field_key in extracted_meta:
+                    field_value = extracted_meta[field_key]
+                    if isinstance(field_value, str):
+                        print(field_value)
+                    else:
+                        print(json.dumps(field_value, cls=BytesEncoder))
+                else:
+                    log.error("Field [%s] not found in png metadata for [file_path: \"%s\"]" % (field_key, path))
+            except InvalidMeta as e:
+                log.error("Unable to extract metadata from [file_path: \"%s\"], field not found" % path)
+                log.debug(e)
+                return
+    except Exception as e:
+        log.error("Error extracting field [%s] from [file_path: \"%s\"]" % (field_key, path))
+        log.debug(e)
+        return
+
+
 def process_file(file_path, idx):
     try:
         png = Image.open(str(file_path) )
@@ -1020,6 +1069,8 @@ def process_file(file_path, idx):
         print_file_meta_csv(file_path, png, image_hash)
     elif (mode == Mode.TOKEYVALUE):
         print_file_meta_keyvalue(file_path, png, image_hash, verbose_png_info=args.verbose_png_info, verbose_comfyui_info=args.verbose_comfyui_info)
+    elif (mode == Mode.EXTRACT):
+        extract_field_value(file_path, png, image_hash, args.extract_field)
     else:  # should never happen
         log.error("Unknown mode: %s" % mode)
         sys.exit(1)
